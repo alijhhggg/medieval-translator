@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -13,7 +14,9 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Button
@@ -49,20 +52,22 @@ class FloatingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
-        val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent?.getParcelableExtra<Intent>("DATA_INTENT")
-        }
+        try {
+            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
+            val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent?.getParcelableExtra<Intent>("DATA_INTENT")
+            }
 
-        if (resultCode == Activity.RESULT_OK && dataIntent != null) {
-            val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            mediaProjection = projectionManager.getMediaProjection(resultCode, dataIntent)
-            Toast.makeText(this, "سرویس اسکرین‌شات آماده شد!", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(this, "خطا در دریافت مجوز اسکرین‌شات", Toast.LENGTH_SHORT).show()
+            if (resultCode == Activity.RESULT_OK && dataIntent != null) {
+                val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                mediaProjection = projectionManager.getMediaProjection(resultCode, dataIntent)
+                Toast.makeText(this, "سرویس اسکرین‌شات آماده شد!", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "خطا در شروع سرویس: ${e.message}", Toast.LENGTH_SHORT).show()
         }
         return START_NOT_STICKY
     }
@@ -129,36 +134,50 @@ class FloatingService : Service() {
             return
         }
 
-        val metrics = resources.displayMetrics
-        val width = metrics.widthPixels
-        val height = metrics.heightPixels
+        try {
+            val metrics = resources.displayMetrics
+            val width = metrics.widthPixels
+            val height = metrics.heightPixels
 
-        val imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        val virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ScreenCapture",
-            width, height, metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader.surface, null, null
-        )
+            val imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            val virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ScreenCapture",
+                width, height, metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader.surface, null, null
+            )
 
-        imageReader.setOnImageAvailableListener({ reader ->
-            val image = reader.acquireLatestImage()
-            if (image != null) {
-                val planes = image.planes
-                val buffer = planes[0].buffer
-                val pixelStride = planes[0].pixelStride
-                val rowStride = planes[0].rowStride
-                val rowPadding = rowStride - pixelStride * width
+            imageReader.setOnImageAvailableListener({ reader ->
+                try {
+                    val image = reader.acquireLatestImage()
+                    if (image != null) {
+                        val planes = image.planes
+                        val buffer = planes[0].buffer
+                        val pixelStride = planes[0].pixelStride
+                        val rowStride = planes[0].rowStride
+                        val rowPadding = rowStride - pixelStride * width
 
-                val bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
-                bitmap.copyPixelsFromBuffer(buffer)
-                image.close()
-                virtualDisplay?.release()
-                imageReader.close()
+                        val bitmapWidth = width + if (pixelStride > 0) rowPadding / pixelStride else 0
+                        val bitmap = Bitmap.createBitmap(bitmapWidth, height, Bitmap.Config.ARGB_8888)
+                        bitmap.copyPixelsFromBuffer(buffer)
 
-                processImage(bitmap)
-            }
-        }, null)
+                        val croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, width, height)
+
+                        image.close()
+                        virtualDisplay?.release()
+                        imageReader.close()
+
+                        processImage(croppedBitmap)
+                    }
+                } catch (e: Exception) {
+                    Handler(Looper.getMainLooper()).post {
+                        resultTextView.text = "خطا در پردازش تصویر: ${e.message}"
+                    }
+                }
+            }, Handler(Looper.getMainLooper()))
+        } catch (e: Exception) {
+            Toast.makeText(this, "خطا در اسکرین‌شات: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun processImage(bitmap: Bitmap) {
@@ -174,8 +193,8 @@ class FloatingService : Service() {
                     resultTextView.text = "متنی روی صفحه پیدا نشد."
                 }
             }
-            .addOnFailureListener {
-                resultTextView.text = "خطا در خواندن متن."
+            .addOnFailureListener { e ->
+                resultTextView.text = "خطا در خواندن متن: ${e.message}"
             }
     }
 
@@ -184,8 +203,8 @@ class FloatingService : Service() {
             ?.addOnSuccessListener { translatedText ->
                 resultTextView.text = translatedText
             }
-            ?.addOnFailureListener {
-                resultTextView.text = "خطا در ترجمه آفلاین."
+            ?.addOnFailureListener { e ->
+                resultTextView.text = "خطا در ترجمه: ${e.message}"
             }
     }
 
@@ -203,7 +222,11 @@ class FloatingService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .build()
 
-        startForeground(1, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(1, notification)
+        }
     }
 
     override fun onDestroy() {
