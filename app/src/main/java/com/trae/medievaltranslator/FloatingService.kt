@@ -1,5 +1,6 @@
 package com.trae.medievaltranslator
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -48,12 +49,20 @@ class FloatingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val resultCode = intent?.getIntExtra("RESULT_CODE", -1) ?: -1
-        val dataIntent = intent?.getParcelableExtra<Intent>("DATA_INTENT")
+        val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
+        val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra<Intent>("DATA_INTENT")
+        }
 
-        if (resultCode != -1 && dataIntent != null) {
+        if (resultCode == Activity.RESULT_OK && dataIntent != null) {
             val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = projectionManager.getMediaProjection(resultCode, dataIntent)
+            Toast.makeText(this, "سرویس اسکرین‌شات آماده شد!", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "خطا در دریافت مجوز اسکرین‌شات", Toast.LENGTH_SHORT).show()
         }
         return START_NOT_STICKY
     }
@@ -205,3 +214,4 @@ class FloatingService : Service() {
         translator?.close()
     }
 }
+
