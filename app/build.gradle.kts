@@ -1,6 +1,6 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("kotlin-android")
 }
 
 android {
@@ -34,11 +34,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
-    implementation("androidx.collection:collection-ktx:1.4.0")
-    
-    // ONNX Runtime برای موتور عصبی
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
-    
-    // ML Kit Text Recognition
+    // خواندن متن از روی عکس (OCR)
     implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.0")
+    // موتور ترجمه آفلاین گوگل
+    implementation("com.google.mlkit:translate:17.0.2")
 }
