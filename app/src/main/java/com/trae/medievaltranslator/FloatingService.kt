@@ -10,6 +10,8 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -31,6 +33,7 @@ import com.google.mlkit.nl.translate.TranslatorOptions
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.util.concurrent.atomic.AtomicBoolean
 
 class FloatingService : Service() {
 
@@ -39,6 +42,7 @@ class FloatingService : Service() {
     private lateinit var resultTextView: TextView
     private var mediaProjection: MediaProjection? = null
     private var translator: Translator? = null
+    private val isProcessing = AtomicBoolean(false)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -46,7 +50,6 @@ class FloatingService : Service() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         startForegroundServiceNotification()
-
         setupTranslator()
         setupFloatingUI()
     }
@@ -64,12 +67,22 @@ class FloatingService : Service() {
             if (resultCode == Activity.RESULT_OK && dataIntent != null) {
                 val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjection = projectionManager.getMediaProjection(resultCode, dataIntent)
-                Toast.makeText(this, "سرویس اسکرین‌شات آماده شد!", Toast.LENGTH_SHORT).show()
+
+                mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        super.onStop()
+                        mediaProjection = null
+                    }
+                }, Handler(Looper.getMainLooper()))
+
+                Toast.makeText(this, "سرویس آماده اسکن است!", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "مجوز اسکرین‌شات دریافت نشد.", Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
-            Toast.makeText(this, "خطا در شروع سرویس: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "خطا در راه‌اندازی: ${e.message}", Toast.LENGTH_LONG).show()
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun setupTranslator() {
@@ -82,7 +95,10 @@ class FloatingService : Service() {
         val conditions = DownloadConditions.Builder().build()
         translator?.downloadModelIfNeeded(conditions)
             ?.addOnSuccessListener {
-                Toast.makeText(this, "مدل ترجمه آفلاین آماده است", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "مدل ترجمه آفلاین آماده شد", Toast.LENGTH_SHORT).show()
+            }
+            ?.addOnFailureListener {
+                Toast.makeText(this, "خطا در دانلود مدل ترجمه! به اینترنت وصل شوید.", Toast.LENGTH_LONG).show()
             }
     }
 
@@ -90,7 +106,11 @@ class FloatingService : Service() {
         floatingButton = Button(this).apply {
             text = "ترجمه ⚔️"
             setOnClickListener {
-                captureAndTranslate()
+                if (isProcessing.get()) {
+                    Toast.makeText(this@FloatingService, "در حال اسکن... صبور باشید", Toast.LENGTH_SHORT).show()
+                } else {
+                    captureAndTranslate()
+                }
             }
         }
 
@@ -109,9 +129,9 @@ class FloatingService : Service() {
         resultTextView = TextView(this).apply {
             setBackgroundColor(0xDD000000.toInt())
             setTextColor(0xFFFFFFFF.toInt())
-            setPadding(20, 20, 20, 20)
-            textSize = 16f
-            text = "متن ترجمه اینجا نشان داده می‌شود..."
+            setPadding(24, 24, 24, 24)
+            textSize = 15f
+            text = "برای ترجمه، روی دکمه (ترجمه ⚔️) بزنید."
         }
 
         val textParams = WindowManager.LayoutParams(
@@ -129,10 +149,14 @@ class FloatingService : Service() {
     }
 
     private fun captureAndTranslate() {
-        if (mediaProjection == null) {
-            Toast.makeText(this, "مجوز اسکرین‌شات دریافت نشده!", Toast.LENGTH_SHORT).show()
+        val proj = mediaProjection
+        if (proj == null) {
+            resultTextView.text = "خطا: مجوز اسکرین‌شات فعال نیست. برنامه را ببندید و دوباره شروع را بزنید."
             return
         }
+
+        isProcessing.set(true)
+        resultTextView.text = "در حال گرفتن عکس از صفحه..."
 
         try {
             val metrics = resources.displayMetrics
@@ -140,16 +164,11 @@ class FloatingService : Service() {
             val height = metrics.heightPixels
 
             val imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-            val virtualDisplay = mediaProjection?.createVirtualDisplay(
-                "ScreenCapture",
-                width, height, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader.surface, null, null
-            )
+            var virtualDisplay: VirtualDisplay? = null
 
             imageReader.setOnImageAvailableListener({ reader ->
                 try {
-                    val image = reader.acquireLatestImage()
+                    val image: Image? = reader.acquireLatestImage()
                     if (image != null) {
                         val planes = image.planes
                         val buffer = planes[0].buffer
@@ -160,51 +179,64 @@ class FloatingService : Service() {
                         val bitmapWidth = width + if (pixelStride > 0) rowPadding / pixelStride else 0
                         val bitmap = Bitmap.createBitmap(bitmapWidth, height, Bitmap.Config.ARGB_8888)
                         bitmap.copyPixelsFromBuffer(buffer)
-
-                        val croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, width, height)
+                        val cleanBitmap = Bitmap.createBitmap(bitmap, 0, 0, width, height)
 
                         image.close()
                         virtualDisplay?.release()
                         imageReader.close()
 
-                        processImage(croppedBitmap)
+                        processImage(cleanBitmap)
                     }
                 } catch (e: Exception) {
-                    Handler(Looper.getMainLooper()).post {
-                        resultTextView.text = "خطا در پردازش تصویر: ${e.message}"
-                    }
+                    isProcessing.set(false)
+                    resultTextView.text = "خطا در تبدیل عکس: ${e.localizedMessage}"
                 }
             }, Handler(Looper.getMainLooper()))
+
+            virtualDisplay = proj.createVirtualDisplay(
+                "ScreenCapture",
+                width, height, metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader.surface, null, null
+            )
+
         } catch (e: Exception) {
-            Toast.makeText(this, "خطا در اسکرین‌شات: ${e.message}", Toast.LENGTH_SHORT).show()
+            isProcessing.set(false)
+            resultTextView.text = "خطا در اسکرین‌شات: ${e.localizedMessage}"
         }
     }
 
     private fun processImage(bitmap: Bitmap) {
+        resultTextView.text = "در حال خواندن متن‌ها (OCR)..."
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
         recognizer.process(inputImage)
             .addOnSuccessListener { visionText ->
-                val text = visionText.text
+                val text = visionText.text.trim()
                 if (text.isNotEmpty()) {
                     translateText(text)
                 } else {
-                    resultTextView.text = "متنی روی صفحه پیدا نشد."
+                    isProcessing.set(false)
+                    resultTextView.text = "هیچ متن انگلیسی روی صفحه پیدا نشد!"
                 }
             }
             .addOnFailureListener { e ->
-                resultTextView.text = "خطا در خواندن متن: ${e.message}"
+                isProcessing.set(false)
+                resultTextView.text = "خطا در تشخیص متن: ${e.localizedMessage}"
             }
     }
 
     private fun translateText(text: String) {
+        resultTextView.text = "در حال ترجمه به فارسی..."
         translator?.translate(text)
             ?.addOnSuccessListener { translatedText ->
+                isProcessing.set(false)
                 resultTextView.text = translatedText
             }
             ?.addOnFailureListener { e ->
-                resultTextView.text = "خطا در ترجمه: ${e.message}"
+                isProcessing.set(false)
+                resultTextView.text = "خطا در ترجمه: ${e.localizedMessage}\n\nمتن اصلی:\n$text"
             }
     }
 
@@ -237,4 +269,3 @@ class FloatingService : Service() {
         translator?.close()
     }
 }
-
