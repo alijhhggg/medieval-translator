@@ -33,7 +33,6 @@ import com.google.mlkit.nl.translate.TranslatorOptions
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import java.util.concurrent.atomic.AtomicBoolean
 
 class FloatingService : Service() {
 
@@ -42,7 +41,63 @@ class FloatingService : Service() {
     private lateinit var resultTextView: TextView
     private var mediaProjection: MediaProjection? = null
     private var translator: Translator? = null
-    private val isProcessing = AtomicBoolean(false)
+
+    // واژه‌نامه تخصصی اصطلاحات Medieval II
+    private val glossary = mapOf(
+        "Excommunicated" to "تکفیر شده (اخراج از کلیسا)",
+        "Excommunication" to "تکفیر (اخراج از کلیسا)",
+        "Annex Settlement" to "تصرف و الحاق سکونتگاه",
+        "Council of Nobles" to "شورای بزرگان",
+        "Papal Election" to "انتخابات پاپ",
+        "Mission from the Pope" to "ماموریت از طرف پاپ",
+        "Papal" to "مربوط به پاپ",
+        "Chivalry" to "جوانمردی و شجاعت",
+        "Dread" to "ترس و وحشت",
+        "Advisor Messages" to "پیام‌های مشاور",
+        "Faction Leader" to "رهبر حکومت",
+        "Faction" to "حکومت",
+        "Factions" to "حکومت‌ها",
+        "Diplomat" to "دیپلمات/سفیر",
+        "Settlement" to "سکونتگاه/شهر",
+        "Cardinal" to "کاردینال",
+        "Inquisitor" to "بازرس کلیسا",
+        "Merchant" to "تاجر",
+        "Spy" to "جاسوس",
+        "Assassin" to "تروریست/قاتل",
+        "Princess" to "شاهزاده خانم",
+        "General" to "ژنرال/فرمانده",
+        "Siege" to "محاصره",
+        "Garrison" to "پادگان دفاعی",
+        "Tribute" to "باج و خراج",
+        "Alliance" to "اتحاد",
+        "Ceasefire" to "آتش‌بس",
+        "Trade Rights" to "حقوق تجاری",
+        "Vassal" to "حکومت دست‌نشانده",
+        "Crusade" to "جنگ صلیبی",
+        "Jihad" to "جهاد",
+        "Guild" to "صنف/انجمن",
+        "Pope" to "پاپ",
+        "Papal States" to "دولت‌های پاپ",
+        "Piety" to "تقوا و دینداری",
+        "Loyalty" to "وفاداری",
+        "Authority" to "اقتدار و قدرت",
+        "Command" to "فرماندهی",
+        "Subjugate" to "مطیع کردن",
+        "Ransom" to "فدیه آزادی اسرا",
+        "Release" to "آزادسازی اسرا",
+        "Exterminate" to "قتل‌عام شهر",
+        "Sack" to "غارت شهر",
+        "Occupy" to "اشغال شهر",
+        "Upkeep" to "هزینه نگهداری",
+        "Public Order" to "نظم عمومی",
+        "Squalor" to "کثیفی و فقر شهر",
+        "Unrest" to "ناآرامی",
+        "Heresy" to "کفر و بدعت",
+        "Heretic" to "کافر/مرتد",
+        "Witch" to "ساحره/جادوگر",
+        "Retinue" to "همراهان و اطرافیان",
+        "Traits" to "ویژگی‌های شخصیتی"
+    )
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -75,7 +130,7 @@ class FloatingService : Service() {
                     }
                 }, Handler(Looper.getMainLooper()))
 
-                Toast.makeText(this, "سرویس آماده اسکن است!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "سرویس فعال شد! هرچقدر می‌خواهید ترجمه کنید.", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this, "مجوز اسکرین‌شات دریافت نشد.", Toast.LENGTH_LONG).show()
             }
@@ -95,10 +150,7 @@ class FloatingService : Service() {
         val conditions = DownloadConditions.Builder().build()
         translator?.downloadModelIfNeeded(conditions)
             ?.addOnSuccessListener {
-                Toast.makeText(this, "مدل ترجمه آفلاین آماده شد", Toast.LENGTH_SHORT).show()
-            }
-            ?.addOnFailureListener {
-                Toast.makeText(this, "خطا در دانلود مدل ترجمه! به اینترنت وصل شوید.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "مدل ترجمه آفلاین آماده است", Toast.LENGTH_SHORT).show()
             }
     }
 
@@ -106,11 +158,7 @@ class FloatingService : Service() {
         floatingButton = Button(this).apply {
             text = "ترجمه ⚔️"
             setOnClickListener {
-                if (isProcessing.get()) {
-                    Toast.makeText(this@FloatingService, "در حال اسکن... صبور باشید", Toast.LENGTH_SHORT).show()
-                } else {
-                    captureAndTranslate()
-                }
+                captureAndTranslate()
             }
         }
 
@@ -131,7 +179,7 @@ class FloatingService : Service() {
             setTextColor(0xFFFFFFFF.toInt())
             setPadding(24, 24, 24, 24)
             textSize = 15f
-            text = "برای ترجمه، روی دکمه (ترجمه ⚔️) بزنید."
+            text = "روی (ترجمه ⚔️) بزنید تا متن اسکن و ترجمه شود."
         }
 
         val textParams = WindowManager.LayoutParams(
@@ -151,12 +199,11 @@ class FloatingService : Service() {
     private fun captureAndTranslate() {
         val proj = mediaProjection
         if (proj == null) {
-            resultTextView.text = "خطا: مجوز اسکرین‌شات فعال نیست. برنامه را ببندید و دوباره شروع را بزنید."
+            resultTextView.text = "خطا: سرویس اسکرین‌شات فعال نیست. برنامه را ببندید و دوباره شروع را بزنید."
             return
         }
 
-        isProcessing.set(true)
-        resultTextView.text = "در حال گرفتن عکس از صفحه..."
+        resultTextView.text = "در حال گرفتن عکس..."
 
         try {
             val metrics = resources.displayMetrics
@@ -188,8 +235,9 @@ class FloatingService : Service() {
                         processImage(cleanBitmap)
                     }
                 } catch (e: Exception) {
-                    isProcessing.set(false)
-                    resultTextView.text = "خطا در تبدیل عکس: ${e.localizedMessage}"
+                    virtualDisplay?.release()
+                    imageReader.close()
+                    resultTextView.text = "خطا در پردازش تصویر: ${e.localizedMessage}"
                 }
             }, Handler(Looper.getMainLooper()))
 
@@ -201,42 +249,59 @@ class FloatingService : Service() {
             )
 
         } catch (e: Exception) {
-            isProcessing.set(false)
             resultTextView.text = "خطا در اسکرین‌شات: ${e.localizedMessage}"
         }
     }
 
     private fun processImage(bitmap: Bitmap) {
-        resultTextView.text = "در حال خواندن متن‌ها (OCR)..."
+        resultTextView.text = "در حال تشخیص متن..."
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
         recognizer.process(inputImage)
             .addOnSuccessListener { visionText ->
-                val text = visionText.text.trim()
-                if (text.isNotEmpty()) {
-                    translateText(text)
+                val cleanTextBlocks = mutableListOf<String>()
+
+                for (block in visionText.textBlocks) {
+                    val blockText = block.text.trim()
+                    // فیلتر کردن اعداد طلا، نویزهای گرافیکی و متون بسیار کوتاه
+                    if (blockText.length > 3 && !blockText.matches(Regex("^[0-9\\s\\W]+$"))) {
+                        cleanTextBlocks.add(blockText)
+                    }
+                }
+
+                if (cleanTextBlocks.isNotEmpty()) {
+                    val fullTextToTranslate = cleanTextBlocks.joinToString("\n\n")
+                    translateTextWithGlossary(fullTextToTranslate)
                 } else {
-                    isProcessing.set(false)
-                    resultTextView.text = "هیچ متن انگلیسی روی صفحه پیدا نشد!"
+                    resultTextView.text = "متن قابل ترجمه‌ای روی صفحه پیدا نشد."
                 }
             }
             .addOnFailureListener { e ->
-                isProcessing.set(false)
                 resultTextView.text = "خطا در تشخیص متن: ${e.localizedMessage}"
             }
     }
 
-    private fun translateText(text: String) {
-        resultTextView.text = "در حال ترجمه به فارسی..."
-        translator?.translate(text)
+    private fun translateTextWithGlossary(originalText: String) {
+        resultTextView.text = "در حال ترجمه..."
+
+        // اعمال واژه‌نامه تخصصی قبل از ترجمه
+        var preProcessedText = originalText
+        for ((key, value) in glossary) {
+            preProcessedText = preProcessedText.replace(Regex("(?i)\\b$key\\b"), value)
+        }
+
+        translator?.translate(preProcessedText)
             ?.addOnSuccessListener { translatedText ->
-                isProcessing.set(false)
-                resultTextView.text = translatedText
+                // اعمال واژه‌نامه نهایی جهت اطمینان از صحت کلمات
+                var finalResult = translatedText
+                for ((key, value) in glossary) {
+                    finalResult = finalResult.replace(Regex("(?i)\\b$key\\b"), value)
+                }
+                resultTextView.text = finalResult
             }
             ?.addOnFailureListener { e ->
-                isProcessing.set(false)
-                resultTextView.text = "خطا در ترجمه: ${e.localizedMessage}\n\nمتن اصلی:\n$text"
+                resultTextView.text = "خطا در ترجمه: ${e.localizedMessage}\n\nمتن اصلی:\n$originalText"
             }
     }
 
