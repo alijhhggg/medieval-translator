@@ -40,9 +40,10 @@ class FloatingService : Service() {
     private lateinit var floatingButton: Button
     private lateinit var resultTextView: TextView
     private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var imageReader: ImageReader? = null
     private var translator: Translator? = null
 
-    // واژه‌نامه تخصصی اصطلاحات Medieval II
     private val glossary = mapOf(
         "Excommunicated" to "تکفیر شده (اخراج از کلیسا)",
         "Excommunication" to "تکفیر (اخراج از کلیسا)",
@@ -126,11 +127,13 @@ class FloatingService : Service() {
                 mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                     override fun onStop() {
                         super.onStop()
-                        mediaProjection = null
+                        stopCaptureSession()
                     }
                 }, Handler(Looper.getMainLooper()))
 
-                Toast.makeText(this, "سرویس فعال شد! هرچقدر می‌خواهید ترجمه کنید.", Toast.LENGTH_SHORT).show()
+                // ساخت دائمی سرویس عکس‌برداری (فقط یک‌بار)
+                startPersistentCapture()
+                Toast.makeText(this, "سرویس فعال شد! بدون محدودیت استفاده کنید.", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this, "مجوز اسکرین‌شات دریافت نشد.", Toast.LENGTH_LONG).show()
             }
@@ -138,6 +141,21 @@ class FloatingService : Service() {
             Toast.makeText(this, "خطا در راه‌اندازی: ${e.message}", Toast.LENGTH_LONG).show()
         }
         return START_STICKY
+    }
+
+    private fun startPersistentCapture() {
+        val proj = mediaProjection ?: return
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+
+        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        virtualDisplay = proj.createVirtualDisplay(
+            "ScreenCapture",
+            width, height, metrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            imageReader?.surface, null, Handler(Looper.getMainLooper())
+        )
     }
 
     private fun setupTranslator() {
@@ -197,59 +215,44 @@ class FloatingService : Service() {
     }
 
     private fun captureAndTranslate() {
-        val proj = mediaProjection
-        if (proj == null) {
+        val reader = imageReader
+        if (mediaProjection == null || reader == null) {
             resultTextView.text = "خطا: سرویس اسکرین‌شات فعال نیست. برنامه را ببندید و دوباره شروع را بزنید."
             return
         }
 
         resultTextView.text = "در حال گرفتن عکس..."
 
+        var image: Image? = null
         try {
+            image = reader.acquireLatestImage()
+            if (image == null) {
+                resultTextView.text = "تصویری دریافت نشد. دوباره بزنید."
+                return
+            }
+
             val metrics = resources.displayMetrics
             val width = metrics.widthPixels
             val height = metrics.heightPixels
 
-            val imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-            var virtualDisplay: VirtualDisplay? = null
+            val planes = image.planes
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val rowPadding = rowStride - pixelStride * width
 
-            imageReader.setOnImageAvailableListener({ reader ->
-                try {
-                    val image: Image? = reader.acquireLatestImage()
-                    if (image != null) {
-                        val planes = image.planes
-                        val buffer = planes[0].buffer
-                        val pixelStride = planes[0].pixelStride
-                        val rowStride = planes[0].rowStride
-                        val rowPadding = rowStride - pixelStride * width
+            val bitmapWidth = width + if (pixelStride > 0) rowPadding / pixelStride else 0
+            val bitmap = Bitmap.createBitmap(bitmapWidth, height, Bitmap.Config.ARGB_8888)
+            bitmap.copyPixelsFromBuffer(buffer)
+            val cleanBitmap = Bitmap.createBitmap(bitmap, 0, 0, width, height)
 
-                        val bitmapWidth = width + if (pixelStride > 0) rowPadding / pixelStride else 0
-                        val bitmap = Bitmap.createBitmap(bitmapWidth, height, Bitmap.Config.ARGB_8888)
-                        bitmap.copyPixelsFromBuffer(buffer)
-                        val cleanBitmap = Bitmap.createBitmap(bitmap, 0, 0, width, height)
-
-                        image.close()
-                        virtualDisplay?.release()
-                        imageReader.close()
-
-                        processImage(cleanBitmap)
-                    }
-                } catch (e: Exception) {
-                    virtualDisplay?.release()
-                    imageReader.close()
-                    resultTextView.text = "خطا در پردازش تصویر: ${e.localizedMessage}"
-                }
-            }, Handler(Looper.getMainLooper()))
-
-            virtualDisplay = proj.createVirtualDisplay(
-                "ScreenCapture",
-                width, height, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader.surface, null, null
-            )
+            // فقط تصویر خامی که برداشتیم بسته می‌شود؛ VirtualDisplay زنده می‌ماند!
+            image.close()
+            processImage(cleanBitmap)
 
         } catch (e: Exception) {
-            resultTextView.text = "خطا در اسکرین‌شات: ${e.localizedMessage}"
+            image?.close()
+            resultTextView.text = "خطا در اسکن: ${e.localizedMessage}"
         }
     }
 
@@ -264,7 +267,6 @@ class FloatingService : Service() {
 
                 for (block in visionText.textBlocks) {
                     val blockText = block.text.trim()
-                    // فیلتر کردن اعداد طلا، نویزهای گرافیکی و متون بسیار کوتاه
                     if (blockText.length > 3 && !blockText.matches(Regex("^[0-9\\s\\W]+$"))) {
                         cleanTextBlocks.add(blockText)
                     }
@@ -285,7 +287,6 @@ class FloatingService : Service() {
     private fun translateTextWithGlossary(originalText: String) {
         resultTextView.text = "در حال ترجمه..."
 
-        // اعمال واژه‌نامه تخصصی قبل از ترجمه
         var preProcessedText = originalText
         for ((key, value) in glossary) {
             preProcessedText = preProcessedText.replace(Regex("(?i)\\b$key\\b"), value)
@@ -293,7 +294,6 @@ class FloatingService : Service() {
 
         translator?.translate(preProcessedText)
             ?.addOnSuccessListener { translatedText ->
-                // اعمال واژه‌نامه نهایی جهت اطمینان از صحت کلمات
                 var finalResult = translatedText
                 for ((key, value) in glossary) {
                     finalResult = finalResult.replace(Regex("(?i)\\b$key\\b"), value)
@@ -326,11 +326,21 @@ class FloatingService : Service() {
         }
     }
 
+    private fun stopCaptureSession() {
+        try {
+            virtualDisplay?.release()
+            virtualDisplay = null
+            imageReader?.close()
+            imageReader = null
+            mediaProjection = null
+        } catch (_: Exception) {}
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         if (::floatingButton.isInitialized) windowManager.removeView(floatingButton)
         if (::resultTextView.isInitialized) windowManager.removeView(resultTextView)
-        mediaProjection?.stop()
+        stopCaptureSession()
         translator?.close()
     }
 }
