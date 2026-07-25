@@ -154,7 +154,7 @@ class FloatingService : Service() {
 
     private fun processImage(bitmap: Bitmap) {
         val inputImage = InputImage.fromBitmap(bitmap, 0)
-        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_SIGN_IN)
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
         recognizer.process(inputImage)
             .addOnSuccessListener { visionText ->
